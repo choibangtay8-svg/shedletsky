@@ -13,8 +13,8 @@ local lp = Players.LocalPlayer
 -- config
 local isEnabled = true
 local startdelay = 0.01
-local duration = 1.2
-local frontstuds = 6.6
+local duration = 1
+local frontstuds = 6.5
 local FRONT_SIGN = -1
 local TARGET_ANIM = "116618003477002"
 
