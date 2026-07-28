@@ -1,0 +1,536 @@
+-- hi skid, u can use source
+-- idea and skid from skibidisense
+
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local Stats = game:GetService("Stats")
+
+local lp = Players.LocalPlayer
+
+-- config
+local isEnabled = true
+local startdelay = 0.1
+local duration = 1
+local frontstuds = 6.5
+local FRONT_SIGN = -1
+local TARGET_ANIM = "116618003477002"
+
+local running = false
+local currentPing = 20
+
+-- smooth ping checker
+task.spawn(function()
+	while true do
+		local ping = 20
+		local success, result = pcall(function()
+			return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+		end)
+		
+		if success and result and result > 0 then
+			ping = result
+		else
+			local pcall2, pingVal = pcall(function() return lp:GetNetworkPing() * 1000 end)
+			if pcall2 and pingVal and pingVal > 0 then
+				ping = pingVal
+			end
+		end
+
+		currentPing = currentPing + (ping - currentPing) * 0.25
+		task.wait(0.2)
+	end
+end)
+
+local function getPredictMult()
+	local p = math.clamp(currentPing, 20, 150)
+	return math.clamp(1.0 + ((p - 20) / 130) * 1.0, 1.0, 2.0)
+end
+
+-- ui system
+local parentGui = pcall(function() return CoreGui.Name end) and CoreGui or lp:WaitForChild("PlayerGui")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "KillerUI_Main"
+gui.ResetOnSpawn = false
+gui.Parent = parentGui
+
+local main = Instance.new("Frame")
+main.Name = "Container"
+main.Size = UDim2.new(0, 220, 0, 0)
+main.AutomaticSize = Enum.AutomaticSize.Y
+main.Position = UDim2.new(0.5, -110, 0.5, -150)
+main.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 8)
+corner.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 10)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = main
+
+local padding = Instance.new("UIPadding")
+padding.PaddingTop = UDim.new(0, 15)
+padding.PaddingBottom = UDim.new(0, 15)
+padding.Parent = main
+
+-- hide button
+local toggleHideBtn = Instance.new("TextButton")
+toggleHideBtn.Size = UDim2.new(0.9, 0, 0, 25)
+toggleHideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+toggleHideBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleHideBtn.Font = Enum.Font.GothamBold
+toggleHideBtn.TextSize = 12
+toggleHideBtn.Text = "HIDE [H]"
+toggleHideBtn.Parent = main
+Instance.new("UICorner", toggleHideBtn).CornerRadius = UDim.new(0, 4)
+
+local hidden = false
+local function toggleUI()
+	hidden = not hidden
+	for _, child in ipairs(main:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") and not child:IsA("UICorner") and child ~= toggleHideBtn then
+			child.Visible = not hidden
+		end
+	end
+	toggleHideBtn.Text = hidden and "SHOW [H]" or "HIDE [H]"
+end
+
+toggleHideBtn.MouseButton1Click:Connect(toggleUI)
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if not gpe and inp.KeyCode == Enum.KeyCode.H then
+		toggleUI()
+	end
+end)
+
+-- drag ui frame
+local isDragging, dragStart, startPos, dragInput
+main.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		isDragging = true
+		dragStart = input.Position
+		startPos = main.Position
+		
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				isDragging = false
+			end
+		end)
+	end
+end)
+
+main.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput and isDragging then
+		local delta = input.Position - dragStart
+		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end
+end)
+
+-- main toggle
+local mainBtn = Instance.new("TextButton")
+mainBtn.Size = UDim2.new(0.9, 0, 0, 40)
+mainBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
+mainBtn.TextColor3 = Color3.new(1, 1, 1)
+mainBtn.Font = Enum.Font.GothamBold
+mainBtn.TextSize = 16
+mainBtn.Text = "MAIN TOGGLE: ON"
+mainBtn.Parent = main
+Instance.new("UICorner", mainBtn).CornerRadius = UDim.new(0, 6)
+
+mainBtn.MouseButton1Click:Connect(function()
+	isEnabled = not isEnabled
+	if isEnabled then
+		mainBtn.Text = "MAIN TOGGLE: ON"
+		mainBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
+	else
+		mainBtn.Text = "MAIN TOGGLE: OFF"
+		mainBtn.BackgroundColor3 = Color3.fromRGB(150, 45, 45)
+	end
+end)
+
+-- setting builder
+local function makeSetting(lblText, defaultVal, onChange)
+	local boxFrame = Instance.new("Frame")
+	boxFrame.Size = UDim2.new(0.9, 0, 0, 35)
+	boxFrame.BackgroundTransparency = 1
+	boxFrame.Parent = main
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.6, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = lblText
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.Font = Enum.Font.GothamSemibold
+	lbl.TextScaled = true
+	lbl.TextWrapped = true
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Parent = boxFrame
+
+	local constraint = Instance.new("UITextSizeConstraint")
+	constraint.MaxTextSize = 13
+	constraint.Parent = lbl
+
+	local input = Instance.new("TextBox")
+	input.Size = UDim2.new(0.4, 0, 1, 0)
+	input.Position = UDim2.new(0.6, 0, 0, 0)
+	input.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	input.TextColor3 = Color3.new(1, 1, 1)
+	input.Font = Enum.Font.Gotham
+	input.TextSize = 14
+	input.Text = tostring(defaultVal)
+	input.Parent = boxFrame
+	Instance.new("UICorner", input).CornerRadius = UDim.new(0, 4)
+
+	input.FocusLost:Connect(function()
+		local val = tonumber(input.Text)
+		if val then
+			onChange(val)
+		else
+			input.Text = tostring(defaultVal)
+		end
+	end)
+end
+
+makeSetting("Start Delay", startdelay, function(v) startdelay = v end)
+makeSetting("Duration", duration, function(v) duration = v end)
+makeSetting("Front Studs", frontstuds, function(v) frontstuds = v end)
+
+-- esp
+local function applyESP(mod, killer)
+	if mod:FindFirstChild("ESP_Highlight") then return end
+
+	local root = mod:WaitForChild("HumanoidRootPart", 5)
+	local hum = mod:WaitForChild("Humanoid", 5)
+	if not root or not hum then return end
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "ESP_Highlight"
+	hl.Adornee = mod
+	hl.FillColor = killer and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+	hl.FillTransparency = 0.5
+	hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+	hl.OutlineTransparency = 0
+	hl.Parent = mod
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "ESP_Billboard"
+	bb.Adornee = root
+	bb.Size = UDim2.new(0, 200, 0, 50)
+	bb.StudsOffset = Vector3.new(0, 3, 0)
+	bb.AlwaysOnTop = true
+	bb.Parent = mod
+
+	local txt = Instance.new("TextLabel")
+	txt.Size = UDim2.new(1, 0, 1, 0)
+	txt.BackgroundTransparency = 1
+	txt.TextColor3 = killer and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(80, 255, 80)
+	txt.Font = Enum.Font.GothamBold
+	txt.TextSize = 13
+	txt.TextStrokeTransparency = 0
+	txt.Parent = bb
+
+	local renderConn
+	renderConn = RunService.RenderStepped:Connect(function()
+		if not mod.Parent or not root.Parent or not hum.Parent then
+			renderConn:Disconnect()
+			return
+		end
+		
+		local myChar = lp.Character
+		local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		local dist = myHrp and math.floor((myHrp.Position - root.Position).Magnitude) or 0
+		
+		if killer then
+			txt.Text = string.format("Killer | %dm", dist)
+		else
+			txt.Text = string.format("Survivor | HP: %d | %dm", math.max(0, math.floor(hum.Health)), dist)
+		end
+	end)
+end
+
+local function initFolder(folder, isKiller)
+	for _, obj in ipairs(folder:GetChildren()) do
+		if obj:IsA("Model") then
+			task.spawn(function() applyESP(obj, isKiller) end)
+		end
+	end
+	folder.ChildAdded:Connect(function(obj)
+		if obj:IsA("Model") then
+			task.spawn(function() applyESP(obj, isKiller) end)
+		end
+	end)
+end
+
+local plrsFolder = workspace:WaitForChild("Players", 10)
+if plrsFolder then
+	local kFolder = plrsFolder:WaitForChild("Killers", 10)
+	local sFolder = plrsFolder:WaitForChild("Survivors", 10)
+	if kFolder then initFolder(kFolder, true) end
+	if sFolder then initFolder(sFolder, false) end
+end
+
+-- main sequence logic
+local function findKillerModel()
+	local pf = workspace:FindFirstChild("Players")
+	if not pf then return end
+	local kf = pf:FindFirstChild("Killers")
+	if not kf then return end
+	
+	for _, child in ipairs(kf:GetDescendants()) do
+		if child:IsA("Model") then
+			local h = child:FindFirstChildOfClass("Humanoid")
+			local r = child:FindFirstChild("HumanoidRootPart")
+			if h and r and h.Health > 0 then
+				return child
+			end
+		end
+	end
+	return nil
+end
+
+local function triggerTeleport()
+	if not isEnabled or running then return end
+	running = true
+
+	local char = lp.Character or lp.CharacterAdded:Wait()
+	local hrp = char:WaitForChild("HumanoidRootPart")
+
+	task.wait(startdelay)
+	if not char.Parent then
+		running = false
+		return
+	end
+
+	local part = Instance.new("Part")
+	part.Name = "place"
+	part.Size = Vector3.new(2, 2, 2)
+	part.Transparency = 0
+	part.CanCollide = false
+	part.Anchored = true
+	part.Parent = char
+
+	local oldPrimary = char.PrimaryPart
+	char.PrimaryPart = part
+
+	local timer = 0
+	local stepConn
+	stepConn = RunService.Heartbeat:Connect(function(dt)
+		if not char.Parent or not part.Parent or not isEnabled then
+			stepConn:Disconnect()
+			if part.Parent then part:Destroy() end
+			if char.Parent then char.PrimaryPart = oldPrimary end
+			running = false
+			return
+		end
+		
+		timer += dt
+		if timer >= duration then
+			stepConn:Disconnect()
+			if part.Parent then part:Destroy() end
+			if char.Parent then char.PrimaryPart = oldPrimary end
+			running = false
+			return
+		end
+
+		local kModel = findKillerModel()
+		if kModel then
+			local kHrp = kModel:FindFirstChild("HumanoidRootPart")
+			if kHrp then
+				local vel = kHrp.AssemblyLinearVelocity
+				local flatVel = Vector3.new(vel.X, 0, vel.Z)
+
+				local offset = Vector3.new(0, 0, 0)
+				if flatVel.Magnitude > 0.5 then
+					offset = flatVel * dt * getPredictMult()
+				end
+
+				local targetPos = kHrp.Position + offset
+				local targetCFrame = CFrame.new(targetPos) * (kHrp.CFrame - kHrp.CFrame.Position)
+
+				part.CFrame = targetCFrame 
+					* CFrame.new(0, 0, FRONT_SIGN * frontstuds) 
+					* CFrame.Angles(0, math.pi, 0)
+
+				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			end
+		end
+	end)
+end
+
+local function onCharAdded(char)
+	local hum = char:WaitForChild("Humanoid")
+	local animator = hum:WaitForChild("Animator")
+	
+	animator.AnimationPlayed:Connect(function(track)
+		if not track or not track.Animation then return end
+		local animId = tostring(track.Animation.AnimationId or ""):gsub("%D", "")
+		if animId == TARGET_ANIM and isEnabled then
+			task.spawn(triggerTeleport)
+		end
+	end)
+end
+
+if lp.Character then
+	onCharAdded(lp.Character)
+end
+lp.CharacterAdded:Connect(onCharAdded)
+
+-- inf stamina
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+
+local function applyStaminaHack()
+    local systems = ReplicatedStorage:FindFirstChild("Systems")
+    local sprintingModule = systems 
+        and systems:FindFirstChild("Character") 
+        and systems.Character:FindFirstChild("Game") 
+        and systems.Character.Game:FindFirstChild("Sprinting")
+
+    if not sprintingModule then return end
+
+    local success, Sprint = pcall(require, sprintingModule)
+    if not success or type(Sprint) ~= "table" then return end
+
+    if rawget(Sprint, "StaminaLoss") then
+        Sprint.StaminaLoss = 0
+    end
+
+    local event = rawget(Sprint, "__staminaChangedEvent")
+    if event and type(event.Fire) == "function" and not rawget(event, "_hooked") then
+        rawset(event, "_hooked", true)
+        local oldFire = event.Fire
+        event.Fire = function(self, val, ...)
+            return oldFire(self, rawget(Sprint, "MaxStamina") or val, ...)
+        end
+    end
+
+    if rawget(Sprint, "MaxStamina") then
+        Sprint.Stamina = Sprint.MaxStamina
+        if event and type(event.Fire) == "function" then
+            event:Fire(Sprint.MaxStamina)
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        pcall(applyStaminaHack)
+        task.wait(0.5)
+    end
+end)
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "Inf stamina",
+        Text = "loaded successfully!",
+        Duration = 3
+    })
+end)
+
+-- anti stun and sprintspeed walkspeed 30
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+
+local lp = Players.LocalPlayer
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "Anti Stun",
+        Text = "loaded successfully!",
+        Duration = 3
+    })
+end)
+
+local function setupChar(char)
+    local hum = char:WaitForChild("Humanoid")
+
+    hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if hum.WalkSpeed < 16 then
+            hum.WalkSpeed = 16
+        elseif hum.WalkSpeed > 17 and hum.WalkSpeed < 30 then
+            hum.WalkSpeed = 30
+        end
+    end)
+
+    if hum.WalkSpeed > 17 and hum.WalkSpeed < 30 then
+        hum.WalkSpeed = 30
+    elseif hum.WalkSpeed < 16 then
+        hum.WalkSpeed = 16
+    end
+
+    hum:GetPropertyChangedSignal("JumpPower"):Connect(function()
+        if hum.JumpPower < 50 then
+            hum.JumpPower = 50
+        end
+    end)
+
+    hum:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+        if hum.PlatformStand then
+            hum.PlatformStand = false
+        end
+    end)
+
+    hum.StateChanged:Connect(function(_, state)
+        if state == Enum.HumanoidStateType.Physics or state == Enum.HumanoidStateType.FallingDown or state == Enum.HumanoidStateType.Ragdoll then
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end
+    end)
+end
+
+if lp.Character then 
+    setupChar(lp.Character) 
+end
+lp.CharacterAdded:Connect(setupChar)
+
+local function fixLighting()
+    Lighting.FogEnd = 9e9
+    Lighting.FogStart = 0
+    Lighting.Brightness = 2
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+    Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+
+    for _, obj in ipairs(Lighting:GetChildren()) do
+        if obj:IsA("Atmosphere") or obj:IsA("PostEffect") or obj:IsA("BloomEffect") or obj:IsA("BlurEffect") or obj:IsA("SunRaysEffect") then
+            obj:Destroy()
+        end
+    end
+end
+
+fixLighting()
+Lighting.Changed:Connect(fixLighting)
+
+local function cleanObj(obj)
+    if obj:IsA("BasePart") then
+        obj.Material = Enum.Material.SmoothPlastic
+        obj.CastShadow = false
+        obj.Reflectance = 0
+    elseif obj:IsA("Decal") or obj:IsA("Texture") then
+        obj:Destroy()
+    elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+        obj.Enabled = false
+    end
+end
+
+for _, obj in ipairs(Workspace:GetDescendants()) do
+    cleanObj(obj)
+end
+
+Workspace.DescendantAdded:Connect(function(obj)
+    task.wait()
+    cleanObj(obj)
+end)
