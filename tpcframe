@@ -10,232 +10,255 @@ local Stats = game:GetService("Stats")
 
 local lp = Players.LocalPlayer
 
--- Configs
-local config = {
-	enabled = true,
-	startDelay = 0.01,
-	duration = 1,
-	frontStuds = 5,
-	frontSign = -1,
-	targetAnim = "116618003477002",
-	maxPredictDist = 2
-}
+-- config
+local isEnabled = true
+local startdelay = 0.01
+local duration = 1
+local frontstuds = 5
+local FRONT_SIGN = -1
+local TARGET_ANIM = "116618003477002"
 
-local state = {
-	running = false,
-	ping = 20,
-	lastVel = nil
-}
+local running = false
+local currentPing = 20
 
--- Smoothed Ping Loop
+-- Variables for acceleration prediction
+local LastVelocity = nil
+local MAX_PREDICT_DISTANCE = 2
+
+-- smooth ping checker
 task.spawn(function()
 	while true do
-		local rawPing = 20
-		local s, res = pcall(function()
+		local ping = 20
+		local success, result = pcall(function()
 			return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 		end)
 		
-		if s and res and res > 0 then
-			rawPing = res
+		if success and result and result > 0 then
+			ping = result
 		else
-			local s2, pVal = pcall(function() return lp:GetNetworkPing() * 1000 end)
-			if s2 and pVal and pVal > 0 then rawPing = pVal end
+			local pcall2, pingVal = pcall(function() return lp:GetNetworkPing() * 1000 end)
+			if pcall2 and pingVal and pingVal > 0 then
+				ping = pingVal
+			end
 		end
 
-		state.ping = state.ping + (rawPing - state.ping) * 0.25
+		currentPing = currentPing + (ping - currentPing) * 0.25
 		task.wait(0.2)
 	end
 end)
 
 local function getPredictMult()
-	local p = math.clamp(state.ping, 20, 150)
-	return math.clamp(1 + ((p - 20) / 130), 1, 2)
+	local p = math.clamp(currentPing, 20, 150)
+	return math.clamp(1.0 + ((p - 20) / 130) * 1.0, 1.0, 2.0)
 end
 
--- Kinematics prediction
-local function getTargetCF(targetRoot, dt)
-	local vel = targetRoot.AssemblyLinearVelocity
-	local flatVel = Vector3.new(vel.X, 0, vel.Z)
+-- Prediction Anchor CFrame Computation
+local function ComputeAnchorCFrame(targetRoot, deltaTime)
+	local velocity = targetRoot.AssemblyLinearVelocity
+	local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
 
-	local accel = Vector3.zero
-	if state.lastVel then
-		accel = (flatVel - state.lastVel) / math.max(dt, 1/240)
+	local acceleration = Vector3.new(0, 0, 0)
+	if LastVelocity then
+		acceleration = (flatVelocity - LastVelocity) / math.max(deltaTime, 1/240)
 	end
-	state.lastVel = flatVel
+	LastVelocity = flatVelocity
 
-	local offset = Vector3.zero
-	if flatVel.Magnitude > 0.5 then
+	local positionOffset = Vector3.new(0, 0, 0)
+	if flatVelocity.Magnitude > 0.5 then
 		local factor = getPredictMult()
-		offset = (flatVel * dt * factor) + (accel * dt * dt * 0.5)
+		positionOffset = (flatVelocity * deltaTime * factor) + (acceleration * deltaTime * deltaTime * 0.5)
 	end
 
-	if offset.Magnitude > config.maxPredictDist then
-		offset = offset.Unit * config.maxPredictDist
+	if positionOffset.Magnitude > MAX_PREDICT_DISTANCE then
+		positionOffset = positionOffset.Unit * MAX_PREDICT_DISTANCE
 	end
 
-	local targetPos = targetRoot.Position + offset
-	local look = targetRoot.CFrame.LookVector
-	local flatLook = Vector3.new(look.X, 0, look.Z)
+	local calculatedPosition = targetRoot.Position + positionOffset
+
+	local lookVector = targetRoot.CFrame.LookVector
+	local flatLook = Vector3.new(lookVector.X, 0, lookVector.Z)
 	if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
+	local stableCFrame = CFrame.lookAt(calculatedPosition, calculatedPosition + flatLook)
 
-	return CFrame.lookAt(targetPos, targetPos + flatLook)
+	return stableCFrame
 end
 
--- UI Construction
-local parent = pcall(function() return CoreGui.Name end) and CoreGui or lp:WaitForChild("PlayerGui")
+-- ui system
+local parentGui = pcall(function() return CoreGui.Name end) and CoreGui or lp:WaitForChild("PlayerGui")
 
-local sg = Instance.new("ScreenGui")
-sg.Name = "KillerUI_Main"
-sg.ResetOnSpawn = false
-sg.Parent = parent
+local gui = Instance.new("ScreenGui")
+gui.Name = "KillerUI_Main"
+gui.ResetOnSpawn = false
+gui.Parent = parentGui
 
 local main = Instance.new("Frame")
+main.Name = "Container"
 main.Size = UDim2.new(0, 220, 0, 0)
 main.AutomaticSize = Enum.AutomaticSize.Y
 main.Position = UDim2.new(0.5, -110, 0.5, -150)
 main.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
 main.BorderSizePixel = 0
 main.Active = true
-main.Parent = sg
+main.Parent = gui
 
-local corner = Instance.new("UICorner", main)
+local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 8)
+corner.Parent = main
 
-local layout = Instance.new("UIListLayout", main)
+local layout = Instance.new("UIListLayout")
 layout.SortOrder = Enum.SortOrder.LayoutOrder
 layout.Padding = UDim.new(0, 10)
 layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = main
 
-local pad = Instance.new("UIPadding", main)
-pad.PaddingTop = UDim.new(0, 15)
-pad.PaddingBottom = UDim.new(0, 15)
+local padding = Instance.new("UIPadding")
+padding.PaddingTop = UDim.new(0, 15)
+padding.PaddingBottom = UDim.new(0, 15)
+padding.Parent = main
 
--- Hide Toggle
-local hideBtn = Instance.new("TextButton")
-hideBtn.Size = UDim2.new(0.9, 0, 0, 25)
-hideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
-hideBtn.TextColor3 = Color3.new(1, 1, 1)
-hideBtn.Font = Enum.Font.GothamBold
-hideBtn.TextSize = 12
-hideBtn.Text = "HIDE [H]"
-hideBtn.Parent = main
-Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 4)
+-- hide button
+local toggleHideBtn = Instance.new("TextButton")
+toggleHideBtn.Size = UDim2.new(0.9, 0, 0, 25)
+toggleHideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+toggleHideBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleHideBtn.Font = Enum.Font.GothamBold
+toggleHideBtn.TextSize = 12
+toggleHideBtn.Text = "HIDE [H]"
+toggleHideBtn.Parent = main
+Instance.new("UICorner", toggleHideBtn).CornerRadius = UDim.new(0, 4)
 
-local isHidden = false
+local hidden = false
 local function toggleUI()
-	isHidden = not isHidden
-	for _, v in ipairs(main:GetChildren()) do
-		if not v:IsA("UIListLayout") and not v:IsA("UIPadding") and not v:IsA("UICorner") and v ~= hideBtn then
-			v.Visible = not isHidden
+	hidden = not hidden
+	for _, child in ipairs(main:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") and not child:IsA("UICorner") and child ~= toggleHideBtn then
+			child.Visible = not hidden
 		end
 	end
-	hideBtn.Text = isHidden and "SHOW [H]" or "HIDE [H]"
+	toggleHideBtn.Text = hidden and "SHOW [H]" or "HIDE [H]"
 end
 
-hideBtn.MouseButton1Click:Connect(toggleUI)
-UserInputService.InputBegan:Connect(function(input, gpe)
-	if not gpe and input.KeyCode == Enum.KeyCode.H then
+toggleHideBtn.MouseButton1Click:Connect(toggleUI)
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if not gpe and inp.KeyCode == Enum.KeyCode.H then
 		toggleUI()
 	end
 end)
 
--- Dragging logic
-local dragging, dragStart, startPos
+-- drag ui frame
+local isDragging, dragStart, startPos, dragInput
 main.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = true
+		isDragging = true
 		dragStart = input.Position
 		startPos = main.Position
 		
 		input.Changed:Connect(function()
 			if input.UserInputState == Enum.UserInputState.End then
-				dragging = false
+				isDragging = false
 			end
 		end)
 	end
 end)
 
+main.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
 UserInputService.InputChanged:Connect(function(input)
-	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+	if input == dragInput and isDragging then
 		local delta = input.Position - dragStart
 		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end
 end)
 
--- Main Toggle Button
-local toggleBtn = Instance.new("TextButton")
-toggleBtn.Size = UDim2.new(0.9, 0, 0, 40)
-toggleBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
-toggleBtn.TextColor3 = Color3.new(1, 1, 1)
-toggleBtn.Font = Enum.Font.GothamBold
-toggleBtn.TextSize = 16
-toggleBtn.Text = "MAIN TOGGLE: ON"
-toggleBtn.Parent = main
-Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
+-- main toggle
+local mainBtn = Instance.new("TextButton")
+mainBtn.Size = UDim2.new(0.9, 0, 0, 40)
+mainBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
+mainBtn.TextColor3 = Color3.new(1, 1, 1)
+mainBtn.Font = Enum.Font.GothamBold
+mainBtn.TextSize = 16
+mainBtn.Text = "MAIN TOGGLE: ON"
+mainBtn.Parent = main
+Instance.new("UICorner", mainBtn).CornerRadius = UDim.new(0, 6)
 
-toggleBtn.MouseButton1Click:Connect(function()
-	config.enabled = not config.enabled
-	toggleBtn.Text = "MAIN TOGGLE: " .. (config.enabled and "ON" or "OFF")
-	toggleBtn.BackgroundColor3 = config.enabled and Color3.fromRGB(45, 150, 45) or Color3.fromRGB(150, 45, 45)
+mainBtn.MouseButton1Click:Connect(function()
+	isEnabled = not isEnabled
+	if isEnabled then
+		mainBtn.Text = "MAIN TOGGLE: ON"
+		mainBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
+	else
+		mainBtn.Text = "MAIN TOGGLE: OFF"
+		mainBtn.BackgroundColor3 = Color3.fromRGB(150, 45, 45)
+	end
 end)
 
--- Value Inputs
-local function createInput(name, default, callback)
-	local container = Instance.new("Frame")
-	container.Size = UDim2.new(0.9, 0, 0, 35)
-	container.BackgroundTransparency = 1
-	container.Parent = main
+-- setting builder
+local function makeSetting(lblText, defaultVal, onChange)
+	local boxFrame = Instance.new("Frame")
+	boxFrame.Size = UDim2.new(0.9, 0, 0, 35)
+	boxFrame.BackgroundTransparency = 1
+	boxFrame.Parent = main
 
 	local lbl = Instance.new("TextLabel")
 	lbl.Size = UDim2.new(0.6, 0, 1, 0)
 	lbl.BackgroundTransparency = 1
-	lbl.Text = name
+	lbl.Text = lblText
 	lbl.TextColor3 = Color3.new(1, 1, 1)
 	lbl.Font = Enum.Font.GothamSemibold
-	lbl.TextSize = 13
+	lbl.TextScaled = true
+	lbl.TextWrapped = true
 	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Parent = container
+	lbl.Parent = boxFrame
 
-	local box = Instance.new("TextBox")
-	box.Size = UDim2.new(0.4, 0, 1, 0)
-	box.Position = UDim2.new(0.6, 0, 0, 0)
-	box.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	box.TextColor3 = Color3.new(1, 1, 1)
-	box.Font = Enum.Font.Gotham
-	box.TextSize = 14
-	box.Text = tostring(default)
-	box.Parent = container
-	Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+	local constraint = Instance.new("UITextSizeConstraint")
+	constraint.MaxTextSize = 13
+	constraint.Parent = lbl
 
-	box.FocusLost:Connect(function()
-		local num = tonumber(box.Text)
-		if num then
-			callback(num)
+	local input = Instance.new("TextBox")
+	input.Size = UDim2.new(0.4, 0, 1, 0)
+	input.Position = UDim2.new(0.6, 0, 0, 0)
+	input.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	input.TextColor3 = Color3.new(1, 1, 1)
+	input.Font = Enum.Font.Gotham
+	input.TextSize = 14
+	input.Text = tostring(defaultVal)
+	input.Parent = boxFrame
+	Instance.new("UICorner", input).CornerRadius = UDim.new(0, 4)
+
+	input.FocusLost:Connect(function()
+		local val = tonumber(input.Text)
+		if val then
+			onChange(val)
 		else
-			box.Text = tostring(default)
+			input.Text = tostring(defaultVal)
 		end
 	end)
 end
 
-createInput("Start Delay", config.startDelay, function(v) config.startDelay = v end)
-createInput("Duration", config.duration, function(v) config.duration = v end)
-createInput("Front Studs", config.frontStuds, function(v) config.frontStuds = v end)
+makeSetting("Start Delay", startdelay, function(v) startdelay = v end)
+makeSetting("Duration", duration, function(v) duration = v end)
+makeSetting("Front Studs", frontstuds, function(v) frontstuds = v end)
 
--- ESP System
-local function setupESP(model, isKiller)
-	if model:FindFirstChild("ESP_Highlight") then return end
+-- esp
+local function applyESP(mod, killer)
+	if mod:FindFirstChild("ESP_Highlight") then return end
 
-	local root = model:WaitForChild("HumanoidRootPart", 5)
-	local hum = model:WaitForChild("Humanoid", 5)
+	local root = mod:WaitForChild("HumanoidRootPart", 5)
+	local hum = mod:WaitForChild("Humanoid", 5)
 	if not root or not hum then return end
 
 	local hl = Instance.new("Highlight")
 	hl.Name = "ESP_Highlight"
-	hl.Adornee = model
-	hl.FillColor = isKiller and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+	hl.Adornee = mod
+	hl.FillColor = killer and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
 	hl.FillTransparency = 0.5
 	hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-	hl.Parent = model
+	hl.OutlineTransparency = 0
+	hl.Parent = mod
 
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "ESP_Billboard"
@@ -243,21 +266,21 @@ local function setupESP(model, isKiller)
 	bb.Size = UDim2.new(0, 200, 0, 50)
 	bb.StudsOffset = Vector3.new(0, 3, 0)
 	bb.AlwaysOnTop = true
-	bb.Parent = model
+	bb.Parent = mod
 
 	local txt = Instance.new("TextLabel")
 	txt.Size = UDim2.new(1, 0, 1, 0)
 	txt.BackgroundTransparency = 1
-	txt.TextColor3 = isKiller and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(80, 255, 80)
+	txt.TextColor3 = killer and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(80, 255, 80)
 	txt.Font = Enum.Font.GothamBold
 	txt.TextSize = 13
 	txt.TextStrokeTransparency = 0
 	txt.Parent = bb
 
-	local conn
-	conn = RunService.RenderStepped:Connect(function()
-		if not model.Parent or not root.Parent or not hum.Parent then
-			conn:Disconnect()
+	local renderConn
+	renderConn = RunService.RenderStepped:Connect(function()
+		if not mod.Parent or not root.Parent or not hum.Parent then
+			renderConn:Disconnect()
 			return
 		end
 		
@@ -265,7 +288,7 @@ local function setupESP(model, isKiller)
 		local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
 		local dist = myHrp and math.floor((myHrp.Position - root.Position).Magnitude) or 0
 		
-		if isKiller then
+		if killer then
 			txt.Text = string.format("Killer | %dm", dist)
 		else
 			txt.Text = string.format("Survivor | HP: %d | %dm", math.max(0, math.floor(hum.Health)), dist)
@@ -273,15 +296,15 @@ local function setupESP(model, isKiller)
 	end)
 end
 
-local function trackFolder(folder, isKiller)
+local function initFolder(folder, isKiller)
 	for _, obj in ipairs(folder:GetChildren()) do
 		if obj:IsA("Model") then
-			task.spawn(setupESP, obj, isKiller)
+			task.spawn(function() applyESP(obj, isKiller) end)
 		end
 	end
 	folder.ChildAdded:Connect(function(obj)
 		if obj:IsA("Model") then
-			task.spawn(setupESP, obj, isKiller)
+			task.spawn(function() applyESP(obj, isKiller) end)
 		end
 	end)
 end
@@ -290,15 +313,16 @@ local plrsFolder = workspace:WaitForChild("Players", 10)
 if plrsFolder then
 	local kFolder = plrsFolder:WaitForChild("Killers", 10)
 	local sFolder = plrsFolder:WaitForChild("Survivors", 10)
-	if kFolder then trackFolder(kFolder, true) end
-	if sFolder then trackFolder(sFolder, false) end
+	if kFolder then initFolder(kFolder, true) end
+	if sFolder then initFolder(sFolder, false) end
 end
 
--- Teleport Logic
-local function getKiller()
+-- main sequence logic
+local function findKillerModel()
 	local pf = workspace:FindFirstChild("Players")
-	local kf = pf and pf:FindFirstChild("Killers")
-	if not kf then return nil end
+	if not pf then return end
+	local kf = pf:FindFirstChild("Killers")
+	if not kf then return end
 	
 	for _, child in ipairs(kf:GetDescendants()) do
 		if child:IsA("Model") then
@@ -309,26 +333,27 @@ local function getKiller()
 			end
 		end
 	end
+	return nil
 end
 
-local function doTeleport()
-	if not config.enabled or state.running then return end
-	state.running = true
-	state.lastVel = nil
+local function triggerTeleport()
+	if not isEnabled or running then return end
+	running = true
+	LastVelocity = nil -- Reset accel tracking mỗi lần trigger để tránh dùng velocity cũ
 
 	local char = lp.Character or lp.CharacterAdded:Wait()
 	local hrp = char:WaitForChild("HumanoidRootPart")
 
-	task.wait(config.startDelay)
+	task.wait(startdelay)
 	if not char.Parent then
-		state.running = false
+		running = false
 		return
 	end
 
 	local part = Instance.new("Part")
 	part.Name = "place"
 	part.Size = Vector3.new(2, 2, 2)
-	part.Transparency = 1
+	part.Transparency = 0
 	part.CanCollide = false
 	part.Anchored = true
 	part.Parent = char
@@ -336,48 +361,59 @@ local function doTeleport()
 	local oldPrimary = char.PrimaryPart
 	char.PrimaryPart = part
 
-	local elapsed = 0
+	local timer = 0
 	local stepConn
-	
 	stepConn = RunService.Heartbeat:Connect(function(dt)
-		elapsed += dt
-		if not char.Parent or not part.Parent or not config.enabled or elapsed >= config.duration then
+		if not char.Parent or not part.Parent or not isEnabled then
 			stepConn:Disconnect()
 			if part.Parent then part:Destroy() end
 			if char.Parent then char.PrimaryPart = oldPrimary end
-			state.running = false
+			running = false
+			return
+		end
+		
+		timer += dt
+		if timer >= duration then
+			stepConn:Disconnect()
+			if part.Parent then part:Destroy() end
+			if char.Parent then char.PrimaryPart = oldPrimary end
+			running = false
 			return
 		end
 
-		local kModel = getKiller()
-		local kHrp = kModel and kModel:FindFirstChild("HumanoidRootPart")
-		if kHrp then
-			local targetCF = getTargetCF(kHrp, dt)
-			part.CFrame = targetCF
-				* CFrame.new(0, 0, config.frontSign * config.frontStuds)
-				* CFrame.Angles(0, math.pi, 0)
+		local kModel = findKillerModel()
+		if kModel then
+			local kHrp = kModel:FindFirstChild("HumanoidRootPart")
+			if kHrp then
+				local calculatedCFrame = ComputeAnchorCFrame(kHrp, dt)
+				part.CFrame = calculatedCFrame
+					* CFrame.new(0, 0, FRONT_SIGN * frontstuds)
+					* CFrame.Angles(0, math.pi, 0)
 
-			hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			end
 		end
 	end)
 end
 
--- Track Animation Trigger
-local function listenAnim(char)
+local function onCharAdded(char)
 	local hum = char:WaitForChild("Humanoid")
 	local animator = hum:WaitForChild("Animator")
 	
 	animator.AnimationPlayed:Connect(function(track)
 		if not track or not track.Animation then return end
-		local animId = tostring(track.Animation.AnimationId):gsub("%D", "")
-		if animId == config.targetAnim and config.enabled then
-			task.spawn(doTeleport)
+		local animId = tostring(track.Animation.AnimationId or ""):gsub("%D", "")
+		if animId == TARGET_ANIM and isEnabled then
+			task.spawn(triggerTeleport)
 		end
 	end)
 end
 
-if lp.Character then listenAnim(lp.Character) end
-lp.CharacterAdded:Connect(listenAnim)
+if lp.Character then
+	onCharAdded(lp.Character)
+end
+lp.CharacterAdded:Connect(onCharAdded)
+
 
 -- inf stamina
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
