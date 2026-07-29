@@ -14,7 +14,7 @@ local lp = Players.LocalPlayer
 local isEnabled = true
 local startdelay = 0.01
 local duration = 1.2
-local frontstuds = 5.5
+local frontstuds = 5
 local FRONT_SIGN = -1
 local TARGET_ANIM = "116618003477002"
 
