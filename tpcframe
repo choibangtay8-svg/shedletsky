@@ -14,7 +14,7 @@ local lp = Players.LocalPlayer
 local isEnabled = true
 local startdelay = 0.01
 local duration = 1.2
-local frontstuds = 5
+local frontstuds = 4.7
 local FRONT_SIGN = -1
 local TARGET_ANIM = "116618003477002"
 
@@ -467,7 +467,7 @@ pcall(function()
     })
 end)
 
--- anti stun and sprintspeed walkspeed 30
+-- anti stun and sprintspeed walkspeed 29.7
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local StarterGui = game:GetService("StarterGui")
@@ -488,13 +488,13 @@ local function setupChar(char)
     hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
         if hum.WalkSpeed < 16 then
             hum.WalkSpeed = 16
-        elseif hum.WalkSpeed > 17 and hum.WalkSpeed < 30 then
-            hum.WalkSpeed = 30
+        elseif hum.WalkSpeed > 17 and hum.WalkSpeed < 29.7 then
+            hum.WalkSpeed = 29.7
         end
     end)
 
-    if hum.WalkSpeed > 17 and hum.WalkSpeed < 30 then
-        hum.WalkSpeed = 30
+    if hum.WalkSpeed > 17 and hum.WalkSpeed < 29.7 then
+        hum.WalkSpeed = 29.7
     elseif hum.WalkSpeed < 16 then
         hum.WalkSpeed = 16
     end
