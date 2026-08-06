@@ -1,0 +1,1171 @@
+-- hi skid, u can use source
+-- idea and skid from skibidisense
+
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local lp = Players.LocalPlayer
+
+local CONFIG = {
+	isEnabled   = true,
+	startdelay  = 0,
+	method      = "PrimaryPart",
+	TARGET_ANIM = "116618003477002",
+
+	WINDUP = 0.525,
+	LINGER = 0.25,
+
+	frontstuds     = 5,
+	MAX_ATTACK_RANGE = 250,
+	TARGET_CONE_DEG = 360,
+	FLIP_MODEL     = true,
+	LUNGE_STUDS    = 0,
+	LINGER_SMEAR   = false,
+	LINGER_SMEAR_STUDS = 0.75,
+
+	PARK_PART_SIZE      = 4,
+	PARK_SNAP_THRESHOLD = 0.05,
+	ANCHOR_HOLD_S       = 0.15,
+	REASSERT_S          = 0.06,
+	FREEZE_HUMANOID     = false,
+	OVERSHOOT_SNAP      = true,
+	OVERSHOOT_MIN_DIST  = 20,
+	OVERSHOOT_ALL       = false,
+	SNAP_FLOOR_STUDS    = 45,
+	OVERSHOOT_PAD_STUDS = 15,
+	FREEZE_HOLD         = false,
+	SILENT_AIM          = false,
+
+	LEAD_TIME = 0.1,
+	LEAD_MAX  = 4,
+	PREDICT_AIRBORNE_Y = false,
+
+	DESYNC_FREEZE     = false,
+	DESYNC_CONVERGE_S = 0.22,
+	ESP_ENABLED       = true,
+}
+
+local running = false
+local attackSerial = 0
+local activeCleanup = nil
+
+local function zeroVelocity(hrp)
+	pcall(function()
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end)
+end
+
+local function flipCF(cf)
+	if CONFIG.FLIP_MODEL then
+		return cf * CFrame.Angles(0, math.pi, 0)
+	end
+	return cf
+end
+
+local function easeOutQuad(t) return 1 - (1 - t) * (1 - t) end
+
+local function hasDesync()
+	return type(NAmanage) == "table"
+		and type(NAStuff) == "table"
+		and type(NAmanage.SetOffsetDesync) == "function"
+end
+
+local function setDesyncAnchor(cf)
+	if typeof(cf) ~= "CFrame" or type(NAStuff) ~= "table" then return false end
+	local ok, observed = pcall(function()
+		NAStuff.desyncOffsetAnchor = cf
+		return NAStuff.desyncOffsetAnchor
+	end)
+	return ok and typeof(observed) == "CFrame"
+end
+
+local function killerPrimaryPart(killerModel)
+	if not killerModel then return nil end
+	if killerModel.PrimaryPart then return killerModel.PrimaryPart end
+	return killerModel:FindFirstChild("HumanoidRootPart")
+end
+
+local function isValidKiller(model)
+	if not model or not model.Parent or not model:IsA("Model") then return false end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	return hum ~= nil and hum.Health > 0 and killerPrimaryPart(model) ~= nil
+end
+
+local function computeHitCFrame(killerPrimary, attackerPos, lunge, lead)
+	local pos = killerPrimary.Position
+	if lead then pos = pos + lead end
+	local origin = attackerPos or (pos + Vector3.new(0, 0, 1))
+	local dir = Vector3.new(pos.X - origin.X, 0, pos.Z - origin.Z)
+	if dir.Magnitude < 0.01 then dir = Vector3.new(0, 0, -1) end
+	dir = dir.Unit
+	local cf = CFrame.lookAt(pos, pos + dir)
+	cf = flipCF(cf)
+	if lunge and lunge > 0 then
+		cf = cf * CFrame.new(0, 0, lunge)
+	end
+	return cf
+end
+
+local velEMA = Vector3.zero
+local velState = { lastPos = nil, lastTime = nil, target = nil }
+local function flattenXZ(v) return Vector3.new(v.X, 0, v.Z) end
+
+local function predictLead(kp, killerHRP, now)
+	if not kp or not kp.Parent then return Vector3.zero end
+	local vel = Vector3.zero
+	local pos = kp.Position
+	if velState.target ~= kp then
+		velState.lastPos, velState.lastTime, velState.target = nil, nil, kp
+		velEMA = Vector3.zero
+	end
+
+	if killerHRP and killerHRP:IsA("BasePart") then
+		local v = flattenXZ(killerHRP.AssemblyLinearVelocity)
+		if v.Magnitude > 0.05 and v.Magnitude < 100 then
+			vel = v
+		end
+	end
+
+	if vel.Magnitude < 0.05 and velState.lastPos and velState.lastTime then
+		local d = now - velState.lastTime
+		if d > 0.02 then
+			local v = flattenXZ((pos - velState.lastPos) / d)
+			if v.Magnitude < 100 then vel = v end
+		end
+	end
+	velState.lastPos = pos
+	velState.lastTime = now
+
+	velEMA = velEMA:Lerp(vel, 0.5)
+	local spd = velEMA.Magnitude
+	local lead = Vector3.zero
+	if spd >= 0.01 then
+		lead = (velEMA / spd) * math.min(spd * math.max(0, CONFIG.LEAD_TIME), math.max(0, CONFIG.LEAD_MAX))
+	end
+	local airborne = false
+	if CONFIG.PREDICT_AIRBORNE_Y and killerHRP and killerHRP:IsA("BasePart") then
+		local model = killerHRP:FindFirstAncestorOfClass("Model")
+		local hum = model and model:FindFirstChildOfClass("Humanoid")
+		if hum then
+			local state = hum:GetState()
+			airborne = state == Enum.HumanoidStateType.Jumping
+				or state == Enum.HumanoidStateType.Freefall
+				or state == Enum.HumanoidStateType.FallingDown
+		end
+	end
+	if airborne and killerHRP and killerHRP:IsA("BasePart") then
+		local y = killerHRP.AssemblyLinearVelocity.Y * math.max(0, CONFIG.LEAD_TIME)
+		lead = Vector3.new(lead.X, math.clamp(y, -CONFIG.LEAD_MAX, CONFIG.LEAD_MAX), lead.Z)
+	end
+	return lead
+end
+
+local charFrozen = false
+local prevHumState = Enum.HumanoidStateType.Running
+
+local function freezeCharacter(hrp, humanoid)
+	if charFrozen then return true end
+	local ok = pcall(function()
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.Anchored = true
+		if CONFIG.FREEZE_HUMANOID and humanoid and humanoid.Parent and humanoid.Health > 0 then
+			prevHumState = humanoid:GetState()
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+		end
+		charFrozen = true
+	end)
+	return ok
+end
+
+local function unfreezeCharacter(hrp, humanoid)
+	if not charFrozen then return end
+	charFrozen = false
+	pcall(function()
+		hrp.Anchored = false
+		zeroVelocity(hrp)
+		if CONFIG.FREEZE_HUMANOID and humanoid and humanoid.Parent and humanoid.Health > 0 then
+			pcall(function() humanoid:ChangeState(prevHumState) end)
+		end
+	end)
+end
+
+local function antiLerpTeleport(char, hrp, humanoid, targetCF, opts)
+	local holdS = CONFIG.ANCHOR_HOLD_S
+	local reassertS = CONFIG.REASSERT_S
+	if type(opts) == "table" then
+		if opts.hold ~= nil then holdS = opts.hold end
+		if opts.reassert ~= nil then reassertS = opts.reassert end
+	end
+
+	local frozen = false
+	local prevState = Enum.HumanoidStateType.Running
+
+	local function restoreMotion()
+		if frozen then
+			frozen = false
+			pcall(function()
+				if humanoid and humanoid.Parent and humanoid.Health > 0 then
+					humanoid:ChangeState(prevState)
+				end
+			end)
+		end
+		pcall(function()
+			hrp.Anchored = false
+			zeroVelocity(hrp)
+		end)
+	end
+
+	local ok = pcall(function()
+		hrp:SetNetworkOwner(lp)
+		zeroVelocity(hrp)
+		if CONFIG.FREEZE_HUMANOID and humanoid and humanoid.Parent and humanoid.Health > 0 then
+			prevState = humanoid:GetState()
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+			frozen = true
+		end
+		hrp.Anchored = true
+		char:PivotTo(targetCF)
+		zeroVelocity(hrp)
+	end)
+	if not ok then
+		restoreMotion()
+		return
+	end
+
+	local holdStart = time()
+	local holdFrames = 0
+	while time() - holdStart < holdS do
+		RunService.PostSimulation:Wait()
+		holdFrames += 1
+		if holdFrames % 3 == 0 then
+			pcall(function()
+				char:PivotTo(targetCF)
+				zeroVelocity(hrp)
+			end)
+		end
+	end
+
+	pcall(function()
+		hrp.Anchored = false
+		char:PivotTo(targetCF)
+		zeroVelocity(hrp)
+	end)
+	restoreMotion()
+
+	local reassertStart = time()
+	while time() - reassertStart < reassertS do
+		RunService.PostSimulation:Wait()
+		pcall(function()
+			char:PivotTo(targetCF)
+			zeroVelocity(hrp)
+		end)
+	end
+end
+
+local function findKillerModel(origin, facing)
+	local pf = workspace:FindFirstChild("Players")
+	local kf = pf and pf:FindFirstChild("Killers")
+	if not kf then return nil end
+	local best, bestDist = nil, math.huge
+	local cosHalfCone = math.cos(math.rad(math.clamp(CONFIG.TARGET_CONE_DEG, 0, 360) * 0.5))
+	-- Killers are direct children of this folder. Scanning every descendant also
+	-- visits every limb/accessory and becomes noticeably expensive on attack.
+	for _, v in ipairs(kf:GetChildren()) do
+		if isValidKiller(v) then
+			local kp = killerPrimaryPart(v)
+			local delta = kp.Position - origin
+			local dist = delta.Magnitude
+			local inCone = true
+			if facing and dist > 0.01 and CONFIG.TARGET_CONE_DEG < 360 then
+				inCone = facing:Dot(delta.Unit) >= cosHalfCone
+			end
+			if inCone and dist < bestDist then
+				best, bestDist = v, dist
+			end
+		end
+	end
+	return best
+end
+
+local function runPrimaryPart(char, hrp, humanoid, km, tp, kHRP, fromPos, HOLD, serial)
+	if CONFIG.SILENT_AIM and kHRP then
+		pcall(function()
+			local look = Vector3.new(kHRP.Position.X - fromPos.X, 0, kHRP.Position.Z - fromPos.Z)
+			if look.Magnitude > 0.01 then
+				local aimCF
+				if CONFIG.FLIP_MODEL then
+					aimCF = CFrame.lookAt(hrp.Position, hrp.Position - look.Unit)
+				else
+					aimCF = CFrame.lookAt(hrp.Position, hrp.Position + look.Unit)
+				end
+				antiLerpTeleport(char, hrp, humanoid, aimCF)
+			end
+		end)
+	end
+
+	velState.lastPos, velState.lastTime, velState.target = nil, nil, nil
+	velEMA = Vector3.zero
+
+	local targetCF0 = computeHitCFrame(tp, fromPos, 0)
+
+	local part = Instance.new("Part")
+	part.Name = "TempPrimaryPart"
+	part.Size = Vector3.new(CONFIG.PARK_PART_SIZE, CONFIG.PARK_PART_SIZE, CONFIG.PARK_PART_SIZE)
+	part.Transparency = 1
+	part.CanCollide = false
+	part.CastShadow = false
+	part.Massless = true
+	part.Anchored = true
+	part.CFrame = targetCF0
+	part.Parent = char
+
+	local oldPrimary = char.PrimaryPart
+	local swapped = pcall(function() char.PrimaryPart = part end)
+	if not swapped or char.PrimaryPart ~= part then
+		pcall(function() part:Destroy() end)
+		running = false
+		return
+	end
+
+	if CONFIG.FREEZE_HOLD then
+		pcall(function()
+			hrp:SetNetworkOwner(lp)
+			hrp.Anchored = true
+			zeroVelocity(hrp)
+		end)
+	end
+
+	local timer = 0
+	local lastParkCF = targetCF0
+	local impacted = false
+	local conn
+
+	local function updateParkCFrame()
+		if not isValidKiller(km) then return end
+		local kp = killerPrimaryPart(km)
+		if not kp then return end
+		local khrp2 = km:FindFirstChild("HumanoidRootPart")
+		local lead = predictLead(kp, khrp2, time())
+
+		local lunge = 0
+		if CONFIG.LUNGE_STUDS > 0 and timer >= CONFIG.WINDUP then
+			if CONFIG.LINGER_SMEAR then
+				local lapse = timer - CONFIG.WINDUP
+				local steps = math.max(1, math.floor(CONFIG.LUNGE_STUDS / CONFIG.LINGER_SMEAR_STUDS + 0.5))
+				local stepDur = math.max(CONFIG.LINGER / steps, 0.001)
+				local stepNum = math.min(steps, math.floor(lapse / stepDur) + 1)
+				lunge = (CONFIG.LUNGE_STUDS / steps) * stepNum
+			else
+				lunge = CONFIG.LUNGE_STUDS
+			end
+		end
+
+		local cf = computeHitCFrame(kp, hrp.Position, lunge, lead)
+
+		if not impacted and timer >= CONFIG.WINDUP then
+			impacted = true
+			lastParkCF = cf
+			part.CFrame = cf
+			return
+		end
+
+		if (cf.Position - lastParkCF.Position).Magnitude < CONFIG.PARK_SNAP_THRESHOLD then
+			return
+		end
+		lastParkCF = cf
+		part.CFrame = cf
+	end
+
+	local function cleanup()
+		if not running or serial ~= attackSerial then return end
+		running = false
+		if activeCleanup == cleanup then activeCleanup = nil end
+		if conn then conn:Disconnect(); conn = nil end
+		pcall(function()
+			char.PrimaryPart = (oldPrimary and oldPrimary.Parent == char) and oldPrimary or hrp
+		end)
+		pcall(function() part:Destroy() end)
+		if CONFIG.FREEZE_HOLD then
+			pcall(function()
+				hrp.Anchored = false
+				zeroVelocity(hrp)
+			end)
+		end
+
+		if humanoid and humanoid.Parent and humanoid.Health > 0 then
+			pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+		end
+	end
+	activeCleanup = cleanup
+
+	conn = RunService.PreSimulation:Connect(function(dt)
+		local ok = pcall(function()
+			if not char.Parent or not part.Parent or not CONFIG.isEnabled
+				or (humanoid and humanoid.Parent and humanoid.Health <= 0) then
+				cleanup()
+				return
+			end
+			timer += dt
+			if timer >= HOLD then
+				cleanup()
+				return
+			end
+			updateParkCFrame()
+		end)
+		if not ok then cleanup() end
+	end)
+
+	task.delay(HOLD + 1, function()
+		if running and serial == attackSerial then cleanup() end
+	end)
+end
+
+local function runDesync(char, hrp, humanoid, km, tp, kHRP, fromPos, dist, HOLD, serial)
+	local function fallbackToPrimary()
+		pcall(function() NAmanage.SetOffsetDesync(false) end)
+		unfreezeCharacter(hrp, humanoid)
+		activeCleanup = nil
+		local ok = pcall(runPrimaryPart, char, hrp, humanoid, km, tp, kHRP, fromPos, HOLD, serial)
+		if not ok then
+			if activeCleanup then pcall(activeCleanup) else running = false end
+		end
+	end
+
+	local okEnable = pcall(function() NAmanage.SetOffsetDesync(true) end)
+	if not okEnable then
+		fallbackToPrimary()
+		return
+	end
+
+	local function emergencyCleanup()
+		if serial ~= attackSerial then return end
+		pcall(function() NAmanage.SetOffsetDesync(false) end)
+		unfreezeCharacter(hrp, humanoid)
+		running = false
+		if activeCleanup == emergencyCleanup then activeCleanup = nil end
+	end
+	activeCleanup = emergencyCleanup
+
+	if CONFIG.DESYNC_FREEZE then
+		if not freezeCharacter(hrp, humanoid) then
+			fallbackToPrimary()
+			return
+		end
+	end
+
+	velState.lastPos, velState.lastTime, velState.target = nil, nil, nil
+	velEMA = Vector3.zero
+
+	local firstCF = computeHitCFrame(tp, fromPos, 0)
+
+	local useOvershoot = CONFIG.OVERSHOOT_SNAP
+		and (dist >= CONFIG.OVERSHOOT_MIN_DIST or CONFIG.OVERSHOOT_ALL)
+
+	if useOvershoot then
+		local overshootOK = pcall(function()
+			local dirRK = firstCF.Position - fromPos
+			if dirRK.Magnitude < 0.01 then dirRK = Vector3.new(0, 0, -1) end
+			dirRK = dirRK.Unit
+			local waypoint = firstCF.Position + dirRK * (CONFIG.SNAP_FLOOR_STUDS + CONFIG.OVERSHOOT_PAD_STUDS)
+			assert(setDesyncAnchor(firstCF + (waypoint - firstCF.Position)), "desync waypoint write failed")
+		end)
+		if not overshootOK then
+			fallbackToPrimary()
+			return
+		end
+		RunService.PostSimulation:Wait()
+	end
+
+	if not setDesyncAnchor(firstCF) then
+		fallbackToPrimary()
+		return
+	end
+
+	local timer = 0
+	local conn
+
+	local function finish()
+		if not running or serial ~= attackSerial then return end
+		running = false
+		if activeCleanup == finish then activeCleanup = nil end
+		if conn then conn:Disconnect(); conn = nil end
+
+		if char and char.Parent and hrp and hrp.Parent then
+			local startAnchor = NAStuff and NAStuff.desyncOffsetAnchor
+			if typeof(startAnchor) ~= "CFrame" then startAnchor = hrp.CFrame end
+			local convStart = time()
+			while time() - convStart < CONFIG.DESYNC_CONVERGE_S do
+				RunService.PostSimulation:Wait()
+				if not char.Parent or not hrp.Parent then break end
+				local alpha = math.min(1, (time() - convStart) / CONFIG.DESYNC_CONVERGE_S)
+				local tgt = startAnchor:Lerp(hrp.CFrame, easeOutQuad(alpha))
+				setDesyncAnchor(tgt)
+			end
+			setDesyncAnchor(hrp.CFrame)
+			RunService.PostSimulation:Wait()
+		end
+
+		pcall(function() NAmanage.SetOffsetDesync(false) end)
+		unfreezeCharacter(hrp, humanoid)
+		zeroVelocity(hrp)
+		if humanoid and humanoid.Parent and humanoid.Health > 0 then
+			pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+		end
+	end
+	activeCleanup = finish
+
+	conn = RunService.PreSimulation:Connect(function(dt)
+		local ok = pcall(function()
+			if not char.Parent then
+				finish()
+				return
+			end
+			if not CONFIG.isEnabled then
+				finish()
+				return
+			end
+			timer += dt
+			if timer >= HOLD then
+				finish()
+				return
+			end
+
+			if not isValidKiller(km) then return end
+			local kp2 = killerPrimaryPart(km)
+			if not kp2 then return end
+			local khrp2 = km:FindFirstChild("HumanoidRootPart")
+			local lead = predictLead(kp2, khrp2, time())
+			local cf = computeHitCFrame(kp2, hrp.Position, 0, lead)
+
+			if not setDesyncAnchor(cf) then finish() end
+		end)
+		if not ok then finish() end
+	end)
+
+	task.delay(HOLD + CONFIG.DESYNC_CONVERGE_S + 1, function()
+		if running and serial == attackSerial then finish() end
+	end)
+end
+
+local parentGui = pcall(function() return CoreGui.Name end) and CoreGui or lp:WaitForChild("PlayerGui")
+
+local previousGui = parentGui:FindFirstChild("KillerUI_Main")
+if previousGui then previousGui:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "KillerUI_Main"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = parentGui
+
+local main = Instance.new("Frame")
+main.Name = "Container"
+main.Size = UDim2.new(0, 220, 0, 0)
+main.Position = UDim2.new(0.5, -110, 0.5, -150)
+main.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+
+-- Keep a real, visible border around both the collapsed and expanded UI. The
+-- explicit height below also makes this entire area a reliable drag target.
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Name = "DragBorder"
+mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+mainStroke.Color = Color3.fromRGB(0, 0, 0)
+mainStroke.Thickness = 4
+mainStroke.Transparency = 0
+mainStroke.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 10)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = main
+
+local padding = Instance.new("UIPadding")
+padding.PaddingTop = UDim.new(0, 15)
+padding.PaddingBottom = UDim.new(0, 15)
+padding.Parent = main
+
+local resizeQueued = false
+local function resizeMain()
+	if resizeQueued then return end
+	resizeQueued = true
+	task.defer(function()
+		resizeQueued = false
+		if main.Parent then
+			-- UIListLayout excludes UIPadding from AbsoluteContentSize.
+			main.Size = UDim2.fromOffset(220, layout.AbsoluteContentSize.Y + 30)
+		end
+	end)
+end
+layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(resizeMain)
+
+local toggleHideBtn = Instance.new("TextButton")
+toggleHideBtn.Size = UDim2.new(0.9, 0, 0, 25)
+toggleHideBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+toggleHideBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleHideBtn.Font = Enum.Font.GothamBold
+toggleHideBtn.TextSize = 12
+toggleHideBtn.Text = "HIDE [H]"
+toggleHideBtn.Parent = main
+Instance.new("UICorner", toggleHideBtn).CornerRadius = UDim.new(0, 4)
+
+local hidden = false
+local function toggleUI()
+	hidden = not hidden
+	for _, child in ipairs(main:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding")
+			and not child:IsA("UICorner") and not child:IsA("UIStroke")
+			and child ~= toggleHideBtn then
+			child.Visible = not hidden
+		end
+	end
+	toggleHideBtn.Text = hidden and "SHOW [H]" or "HIDE [H]"
+	resizeMain()
+end
+toggleHideBtn.MouseButton1Click:Connect(toggleUI)
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if not gpe and inp.KeyCode == Enum.KeyCode.H then toggleUI() end
+end)
+
+local isDragging, dragStart, startPos, dragInput, dragPress
+main.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		isDragging = true
+		dragPress = input
+		dragStart = input.Position
+		startPos = main.Position
+	end
+end)
+main.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput and isDragging then
+		local delta = input.Position - dragStart
+		main.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input == dragPress then
+		isDragging = false
+		dragPress = nil
+	end
+end)
+
+local mainBtn = Instance.new("TextButton")
+mainBtn.Size = UDim2.new(0.9, 0, 0, 40)
+mainBtn.BackgroundColor3 = Color3.fromRGB(45, 150, 45)
+mainBtn.TextColor3 = Color3.new(1, 1, 1)
+mainBtn.Font = Enum.Font.GothamBold
+mainBtn.TextSize = 16
+mainBtn.Text = "MAIN TOGGLE: ON"
+mainBtn.Parent = main
+Instance.new("UICorner", mainBtn).CornerRadius = UDim.new(0, 6)
+mainBtn.MouseButton1Click:Connect(function()
+	CONFIG.isEnabled = not CONFIG.isEnabled
+	mainBtn.Text = CONFIG.isEnabled and "MAIN TOGGLE: ON" or "MAIN TOGGLE: OFF"
+	mainBtn.BackgroundColor3 = CONFIG.isEnabled
+		and Color3.fromRGB(45, 150, 45)
+		or Color3.fromRGB(150, 45, 45)
+end)
+
+local methodBtn = Instance.new("TextButton")
+methodBtn.Size = UDim2.new(0.9, 0, 0, 34)
+methodBtn.BackgroundColor3 = Color3.fromRGB(40, 90, 160)
+methodBtn.TextColor3 = Color3.new(1, 1, 1)
+methodBtn.Font = Enum.Font.GothamBold
+methodBtn.TextSize = 13
+methodBtn.Text = "METHOD: PRIMARYPART"
+methodBtn.Parent = main
+Instance.new("UICorner", methodBtn).CornerRadius = UDim.new(0, 6)
+local function updateMethodUI()
+	methodBtn.Text = "METHOD: " .. CONFIG.method:upper()
+	methodBtn.BackgroundColor3 = (CONFIG.method == "Desync")
+		and Color3.fromRGB(40, 90, 160)
+		or Color3.fromRGB(0, 120, 120)
+end
+methodBtn.MouseButton1Click:Connect(function()
+	CONFIG.method = (CONFIG.method == "Desync") and "PrimaryPart" or "Desync"
+	updateMethodUI()
+end)
+updateMethodUI()
+
+local function makeSetting(lblText, defaultVal, onChange, minVal, maxVal)
+	local boxFrame = Instance.new("Frame")
+	boxFrame.Size = UDim2.new(0.9, 0, 0, 35)
+	boxFrame.BackgroundTransparency = 1
+	boxFrame.Parent = main
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.6, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = lblText
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.Font = Enum.Font.GothamSemibold
+	lbl.TextScaled = true
+	lbl.TextWrapped = true
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Parent = boxFrame
+	Instance.new("UITextSizeConstraint", lbl).MaxTextSize = 13
+
+	local input = Instance.new("TextBox")
+	input.Size = UDim2.new(0.4, 0, 1, 0)
+	input.Position = UDim2.new(0.6, 0, 0, 0)
+	input.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	input.TextColor3 = Color3.new(1, 1, 1)
+	input.Font = Enum.Font.Gotham
+	input.TextSize = 14
+	input.Text = tostring(defaultVal)
+	input.Parent = boxFrame
+	Instance.new("UICorner", input).CornerRadius = UDim.new(0, 4)
+
+	local currentVal = defaultVal
+	input.FocusLost:Connect(function()
+		local val = tonumber(input.Text)
+		if val and val == val and math.abs(val) < math.huge then
+			if minVal then val = math.max(minVal, val) end
+			if maxVal then val = math.min(maxVal, val) end
+			currentVal = val
+			input.Text = tostring(val)
+			onChange(val)
+		else
+			input.Text = tostring(currentVal)
+		end
+	end)
+end
+
+makeSetting("Start Delay", CONFIG.startdelay, function(v) CONFIG.startdelay = v end, 0, 5)
+makeSetting("Windup", CONFIG.WINDUP, function(v) CONFIG.WINDUP = v end, 0, 5)
+makeSetting("Linger", CONFIG.LINGER, function(v) CONFIG.LINGER = v end, 0, 5)
+makeSetting("Front Studs", CONFIG.frontstuds, function(v) CONFIG.frontstuds = v end, 0, 50)
+makeSetting("Max Range", CONFIG.MAX_ATTACK_RANGE, function(v) CONFIG.MAX_ATTACK_RANGE = v end, 0, 10000)
+makeSetting("Part Size", CONFIG.PARK_PART_SIZE, function(v) CONFIG.PARK_PART_SIZE = v end, 0.1, 20)
+makeSetting("Lead Time", CONFIG.LEAD_TIME, function(v) CONFIG.LEAD_TIME = v end, 0, 1)
+makeSetting("Lead Max", CONFIG.LEAD_MAX, function(v) CONFIG.LEAD_MAX = v end, 0, 30)
+makeSetting("Lunge", CONFIG.LUNGE_STUDS, function(v) CONFIG.LUNGE_STUDS = v end, 0, 30)
+makeSetting("Desync Return", CONFIG.DESYNC_CONVERGE_S, function(v) CONFIG.DESYNC_CONVERGE_S = v end, 0, 5)
+makeSetting("Overshoot All", CONFIG.OVERSHOOT_ALL and 1 or 0, function(v) CONFIG.OVERSHOOT_ALL = v > 0 end, 0, 1)
+makeSetting("Airborne Y", CONFIG.PREDICT_AIRBORNE_Y and 1 or 0, function(v) CONFIG.PREDICT_AIRBORNE_Y = v > 0 end, 0, 1)
+makeSetting("ESP Enabled", CONFIG.ESP_ENABLED and 1 or 0, function(v) CONFIG.ESP_ENABLED = v > 0 end, 0, 1)
+resizeMain()
+
+local espRecords = {}
+
+local function applyESP(mod, killer)
+	if mod:FindFirstChild("ESP_Highlight") then return end
+
+	local root = mod:WaitForChild("HumanoidRootPart", 5)
+	local hum = mod:WaitForChild("Humanoid", 5)
+	if not root or not hum then return end
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "ESP_Highlight"
+	hl.Adornee = mod
+	hl.FillColor = killer and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+	hl.FillTransparency = 0.5
+	hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+	hl.OutlineTransparency = 0
+	hl.Enabled = CONFIG.ESP_ENABLED
+	hl.Parent = mod
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "ESP_Billboard"
+	bb.Size = UDim2.new(0, 200, 0, 50)
+	bb.AlwaysOnTop = true
+	bb.Enabled = CONFIG.ESP_ENABLED
+	bb.Parent = mod
+
+	local txt = Instance.new("TextLabel")
+	txt.Size = UDim2.new(1, 0, 1, 0)
+	txt.BackgroundTransparency = 1
+	txt.TextColor3 = killer and Color3.fromRGB(255, 80, 80) or Color3.fromRGB(80, 255, 80)
+	txt.Font = Enum.Font.GothamBold
+	txt.TextSize = 13
+	txt.TextStrokeTransparency = 0
+	txt.Parent = bb
+
+	bb.Parent = root
+	bb.StudsOffset = Vector3.new(0, (root.Size.Y / 2) + 1.75, 0)
+	espRecords[mod] = {
+		root = root, hum = hum, label = txt, killer = killer,
+		highlight = hl, billboard = bb, visible = CONFIG.ESP_ENABLED,
+	}
+end
+
+local ESP_UPDATE_INTERVAL = 0.1
+local espElapsed = ESP_UPDATE_INTERVAL
+RunService.Heartbeat:Connect(function(dt)
+	espElapsed += dt
+	if espElapsed < ESP_UPDATE_INTERVAL then return end
+	espElapsed = 0
+
+	local cam = workspace.CurrentCamera
+	local camPos = cam and cam.CFrame.Position
+	for mod, record in pairs(espRecords) do
+		if not mod.Parent or not record.root.Parent or not record.hum.Parent then
+			espRecords[mod] = nil
+		else
+			if record.visible ~= CONFIG.ESP_ENABLED then
+				record.visible = CONFIG.ESP_ENABLED
+				record.highlight.Enabled = CONFIG.ESP_ENABLED
+				record.billboard.Enabled = CONFIG.ESP_ENABLED
+			end
+			if not CONFIG.ESP_ENABLED then continue end
+			local dist = camPos and math.floor((camPos - record.root.Position).Magnitude) or 0
+			local text
+			if record.killer then
+				text = string.format("Killer | %dm", dist)
+			else
+				local hp = math.max(0, math.floor(record.hum.Health))
+				text = string.format("Survivor | HP: %d | %dm", hp, dist)
+			end
+			if record.lastText ~= text then
+				record.lastText = text
+				record.label.Text = text
+			end
+		end
+	end
+end)
+
+local function initFolder(folder, isKiller)
+	for _, obj in ipairs(folder:GetChildren()) do
+		if obj:IsA("Model") then task.spawn(function() applyESP(obj, isKiller) end) end
+	end
+	folder.ChildAdded:Connect(function(obj)
+		if obj:IsA("Model") then task.spawn(function() applyESP(obj, isKiller) end) end
+	end)
+end
+
+local plrsFolder = workspace:WaitForChild("Players", 10)
+if plrsFolder then
+	local kFolder = plrsFolder:WaitForChild("Killers", 10)
+	local sFolder = plrsFolder:WaitForChild("Survivors", 10)
+	if kFolder then initFolder(kFolder, true) end
+	if sFolder then initFolder(sFolder, false) end
+end
+
+local function triggerTeleport()
+	if not CONFIG.isEnabled or running then return end
+	running = true
+
+	local char = lp.Character or lp.CharacterAdded:Wait()
+	local hrp = char:WaitForChild("HumanoidRootPart", 5)
+	local humanoid = char:WaitForChild("Humanoid", 5)
+	if not hrp or not humanoid or not char.Parent then
+		running = false
+		return
+	end
+
+	local fromPos = hrp.CFrame.Position
+	local facing = hrp.CFrame.LookVector
+	local km = findKillerModel(fromPos, facing)
+	local tp = killerPrimaryPart(km)
+	if not tp or not char.Parent then
+		running = false
+		return
+	end
+
+	local HOLD = CONFIG.WINDUP + CONFIG.LINGER
+
+	local dist = (tp.Position - fromPos).Magnitude
+	if dist < CONFIG.frontstuds then
+		running = false
+		return
+	end
+	if CONFIG.MAX_ATTACK_RANGE > 0 and dist > CONFIG.MAX_ATTACK_RANGE then
+		running = false
+		return
+	end
+
+	local kHRP = km and km:FindFirstChild("HumanoidRootPart")
+
+	attackSerial += 1
+	local serial = attackSerial
+	activeCleanup = nil
+	task.spawn(function()
+		local delayS = math.max(0, CONFIG.startdelay)
+		if delayS > 0 then task.wait(delayS) end
+		if not running or serial ~= attackSerial or not CONFIG.isEnabled or not char.Parent then
+			running = false
+			return
+		end
+		if not isValidKiller(km) then
+			running = false
+			return
+		end
+		tp = killerPrimaryPart(km)
+		kHRP = km:FindFirstChild("HumanoidRootPart")
+		fromPos = hrp.Position
+		dist = (tp.Position - fromPos).Magnitude
+		if dist < CONFIG.frontstuds
+			or (CONFIG.MAX_ATTACK_RANGE > 0 and dist > CONFIG.MAX_ATTACK_RANGE) then
+			running = false
+			return
+		end
+		local ok
+		if CONFIG.method == "Desync" and hasDesync() then
+			ok = pcall(runDesync, char, hrp, humanoid, km, tp, kHRP, fromPos, dist, HOLD, serial)
+		else
+			ok = pcall(runPrimaryPart, char, hrp, humanoid, km, tp, kHRP, fromPos, HOLD, serial)
+		end
+		if not ok then
+			if activeCleanup then
+				pcall(activeCleanup)
+			else
+				running = false
+			end
+		end
+	end)
+end
+
+local function onCharAdded(char)
+	local hum = char:WaitForChild("Humanoid")
+	local animator = hum:WaitForChild("Animator")
+
+	animator.AnimationPlayed:Connect(function(track)
+		if not track or not track.Animation then return end
+		local animId = tostring(track.Animation.AnimationId or ""):gsub("%D", "")
+		if animId == CONFIG.TARGET_ANIM and CONFIG.isEnabled then
+			task.spawn(triggerTeleport)
+		end
+	end)
+end
+
+if lp.Character then onCharAdded(lp.Character) end
+lp.CharacterAdded:Connect(onCharAdded)
+
+
+-- inf stamina
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local sprintCache = nil
+
+local function applyStaminaHack()
+	if not sprintCache then
+		local systems = ReplicatedStorage:FindFirstChild("Systems")
+		local character = systems and systems:FindFirstChild("Character")
+		local gameFolder = character and character:FindFirstChild("Game")
+		local sprintingModule = gameFolder and gameFolder:FindFirstChild("Sprinting")
+		if not sprintingModule then return end
+
+		local success, sprint = pcall(require, sprintingModule)
+		if not success or type(sprint) ~= "table" then return end
+		sprintCache = sprint
+	end
+
+	local Sprint = sprintCache
+
+	if rawget(Sprint, "StaminaLoss") ~= nil and Sprint.StaminaLoss ~= 0 then
+		Sprint.StaminaLoss = 0
+	end
+
+    local event = rawget(Sprint, "__staminaChangedEvent")
+    if event and type(event.Fire) == "function" and not rawget(event, "_hooked") then
+        rawset(event, "_hooked", true)
+        local oldFire = event.Fire
+        event.Fire = function(self, val, ...)
+            return oldFire(self, rawget(Sprint, "MaxStamina") or val, ...)
+        end
+    end
+
+	if rawget(Sprint, "MaxStamina") and Sprint.Stamina ~= Sprint.MaxStamina then
+		Sprint.Stamina = Sprint.MaxStamina
+		if event and type(event.Fire) == "function" then
+            event:Fire(Sprint.MaxStamina)
+        end
+    end
+end
+
+task.spawn(function()
+	while true do
+		pcall(applyStaminaHack)
+		task.wait(1)
+	end
+end)
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "Inf stamina",
+        Text = "loaded successfully!",
+        Duration = 3
+    })
+end)
+
+-- anti stun and sprintspeed boost
+
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "Anti Stun",
+        Text = "loaded successfully!",
+        Duration = 3
+    })
+end)
+
+local function setupChar(char)
+    local hum = char:WaitForChild("Humanoid")
+
+    hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if hum.WalkSpeed < 16 then
+            hum.WalkSpeed = 16
+        elseif hum.WalkSpeed > 17 and hum.WalkSpeed < 28 then
+            hum.WalkSpeed = 28
+        end
+    end)
+
+    if hum.WalkSpeed > 17 and hum.WalkSpeed < 28 then
+        hum.WalkSpeed = 28
+    elseif hum.WalkSpeed < 16 then
+        hum.WalkSpeed = 16
+    end
+
+    hum:GetPropertyChangedSignal("JumpPower"):Connect(function()
+        if hum.JumpPower < 50 then
+            hum.JumpPower = 50
+        end
+    end)
+
+    hum:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+        if hum.PlatformStand then
+            hum.PlatformStand = false
+        end
+    end)
+
+    hum.StateChanged:Connect(function(_, state)
+        if state == Enum.HumanoidStateType.Physics or state == Enum.HumanoidStateType.FallingDown or state == Enum.HumanoidStateType.Ragdoll then
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end
+    end)
+end
+
+if lp.Character then 
+    setupChar(lp.Character) 
+end
+lp.CharacterAdded:Connect(setupChar)
+
+local lightingTargets = {
+	FogEnd = 9e9,
+	FogStart = 0,
+	Brightness = 2,
+	GlobalShadows = false,
+	Ambient = Color3.fromRGB(255, 255, 255),
+	OutdoorAmbient = Color3.fromRGB(255, 255, 255),
+}
+
+local function removeLightingEffect(obj)
+	if obj:IsA("Atmosphere") or obj:IsA("PostEffect") then
+		obj:Destroy()
+	end
+end
+
+for property, target in pairs(lightingTargets) do
+	if Lighting[property] ~= target then Lighting[property] = target end
+	local propertyName, targetValue = property, target
+	Lighting:GetPropertyChangedSignal(propertyName):Connect(function()
+		if Lighting[propertyName] ~= targetValue then
+			Lighting[propertyName] = targetValue
+		end
+	end)
+end
+for _, obj in ipairs(Lighting:GetChildren()) do removeLightingEffect(obj) end
+Lighting.ChildAdded:Connect(removeLightingEffect)
+
+local function cleanObj(obj)
+	if obj:IsA("BasePart") then
+		if obj.Material ~= Enum.Material.SmoothPlastic then obj.Material = Enum.Material.SmoothPlastic end
+		if obj.CastShadow then obj.CastShadow = false end
+		if obj.Reflectance ~= 0 then obj.Reflectance = 0 end
+	elseif obj:IsA("Decal") or obj:IsA("Texture") then
+		obj:Destroy()
+	elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+		if obj.Enabled then obj.Enabled = false end
+	end
+end
+
+-- Process world cleanup in bounded batches so loading a map does not freeze a
+-- frame or create one scheduler task per descendant.
+local cleanQueue = Workspace:GetDescendants()
+local cleanHead = 1
+local cleanTail = #cleanQueue
+local CLEAN_BATCH_SIZE = 100
+
+local function enqueueClean(obj)
+	cleanTail += 1
+	cleanQueue[cleanTail] = obj
+end
+
+Workspace.DescendantAdded:Connect(function(obj)
+	enqueueClean(obj)
+end)
+
+RunService.Heartbeat:Connect(function()
+	local batchEnd = math.min(cleanTail, cleanHead + CLEAN_BATCH_SIZE - 1)
+	while cleanHead <= batchEnd do
+		local obj = cleanQueue[cleanHead]
+		cleanQueue[cleanHead] = nil
+		cleanHead += 1
+		if obj and obj.Parent then pcall(cleanObj, obj) end
+	end
+	if cleanHead > cleanTail then
+		cleanQueue = {}
+		cleanHead = 1
+		cleanTail = 0
+	end
+end)
+
+
+-- auto gen 1.5s
+
+local isFixing = false
+local fixThread = nil
+
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+
+    if not checkcaller() and method == "InvokeServer" and self.Name == "RF" then
+		local action = select(1, ...)
+		if action == "Enter" then
+            isFixing = true
+            if fixThread then
+                task.cancel(fixThread)
+            end
+            fixThread = task.spawn(function()
+                while isFixing do
+                    task.wait(1.5)
+                    if not isFixing then break end
+                    local remotes = self.Parent
+                    if remotes and remotes:FindFirstChild("RE") then
+                        remotes.RE:FireServer()
+                    end
+                end
+            end)
+		elseif action == "Leave" then
+            isFixing = false
+            if fixThread then
+                task.cancel(fixThread)
+                fixThread = nil
+            end
+        end
+    end
+
+    return oldNamecall(self, ...)
+end)
